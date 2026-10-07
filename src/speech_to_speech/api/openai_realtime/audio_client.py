@@ -62,6 +62,7 @@ class RealtimeAudioClientConfig:
     voice: Optional[str] = None
     print_json: bool = False
     block_mic_during_playback: bool = False
+    echo_cancellation: bool = False
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -863,8 +864,6 @@ async def _run_audio_session(
     config: RealtimeAudioClientConfig,
     stop_event: Event,
 ) -> None:
-    import sounddevice as sd
-
     mic_queue: Queue[bytes] = Queue(maxsize=128)
     playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
     renderer = _FriendlyEventRenderer()
@@ -875,15 +874,18 @@ async def _run_audio_session(
             logger.warning("Speaker status: %s", status)
         playback.write(outdata)
 
-    def callback_send(indata: Any, _frames: int, _time_info: Any, status: Any) -> None:
-        if status:
-            logger.warning("Microphone status: %s", status)
+    def queue_mic_audio(chunk: bytes) -> None:
         if config.block_mic_during_playback and playback.is_active():
             return
         try:
-            mic_queue.put_nowait(bytes(indata))
+            mic_queue.put_nowait(chunk)
         except Full:
             logger.debug("Dropping local microphone chunk because the send queue is full")
+
+    def callback_send(indata: Any, _frames: int, _time_info: Any, status: Any) -> None:
+        if status:
+            logger.warning("Microphone status: %s", status)
+        queue_mic_audio(bytes(indata))
 
     async def send_audio() -> None:
         while not stop_event.is_set():
@@ -912,24 +914,39 @@ async def _run_audio_session(
     opened_streams: list[Any] = []
     started_streams: list[Any] = []
     try:
-        input_stream = sd.RawInputStream(
-            samplerate=config.send_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=config.chunk_size,
-            callback=callback_send,
-            device=config.input_device,
-        )
-        opened_streams.append(input_stream)
-        output_stream = sd.RawOutputStream(
-            samplerate=config.recv_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=config.chunk_size,
-            callback=callback_recv,
-            device=config.output_device,
-        )
-        opened_streams.append(output_stream)
+        if config.echo_cancellation:
+            from speech_to_speech.api.openai_realtime.macos_voice_processing import VoiceProcessingAudioIO
+
+            opened_streams.append(
+                VoiceProcessingAudioIO(
+                    send_rate=config.send_rate,
+                    recv_rate=config.recv_rate,
+                    chunk_size=config.chunk_size,
+                    on_input=queue_mic_audio,
+                    fill_output=playback.write,
+                )
+            )
+        else:
+            import sounddevice as sd
+
+            input_stream = sd.RawInputStream(
+                samplerate=config.send_rate,
+                channels=1,
+                dtype="int16",
+                blocksize=config.chunk_size,
+                callback=callback_send,
+                device=config.input_device,
+            )
+            opened_streams.append(input_stream)
+            output_stream = sd.RawOutputStream(
+                samplerate=config.recv_rate,
+                channels=1,
+                dtype="int16",
+                blocksize=config.chunk_size,
+                callback=callback_recv,
+                device=config.output_device,
+            )
+            opened_streams.append(output_stream)
 
         for stream in opened_streams:
             stream.start()
