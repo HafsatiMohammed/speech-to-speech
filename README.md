@@ -54,6 +54,15 @@ Run the configuration you chose with this environment activated. Activate the sa
 
 If speaker feedback interrupts replies, add `--local_audio_block_mic_during_playback` to your `speech-to-speech local` command. This pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks.
 
+To keep voice interruptions without headphones on macOS, use Apple's voice-processing echo canceller instead:
+
+```bash
+pip install 'speech-to-speech[macos-aec]'
+speech-to-speech local --mac-optimal-settings --echo-cancellation
+```
+
+It uses the system default microphone and speaker, so it cannot be combined with `--local_audio_input_device` or `--local_audio_output_device`. See [Echo cancellation](docs/echo-cancellation.md) for details and a browser fallback.
+
 ### Apple Silicon, fully local
 
 Run all three models locally on an Apple Silicon Mac, using a quantized LLM through MLX. No API key is needed.
